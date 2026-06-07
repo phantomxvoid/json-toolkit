@@ -17,12 +17,14 @@ import {
   Minus,
   ArrowRightLeft,
   CheckCircle2,
+  Braces,
 } from "lucide-react";
 
 import { diffJson, formatDiffAsText, type DiffEntry, type DiffResult } from "./utils/diff";
 import { formatJson, minifyJson } from "./utils/formatter";
 import { validateJson } from "./utils/validator";
 import { downloadJson } from "./utils/downloader";
+import { jsonToXml } from "./utils/xmlTransformer";
 
 type Theme = "dark" | "light";
 
@@ -116,6 +118,7 @@ function App() {
   const [status, setStatus] = useState("");
   const [toolMode, setToolMode] = useState<"single" | "diff">("single");
   const [viewMode, setViewMode] = useState<"raw" | "tree">("raw");
+  const [outputLang, setOutputLang] = useState<"json" | "xml">("json");
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const darkMode = theme === "dark";
   const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -135,6 +138,7 @@ function App() {
   const handleFormat = () => {
     try {
       setOutput(formatJson(input));
+      setOutputLang("json");
       showStatus("✅ Formatted");
     } catch (error) {
       showStatus(`❌ ${(error as Error).message}`);
@@ -144,7 +148,19 @@ function App() {
   const handleMinify = () => {
     try {
       setOutput(minifyJson(input));
+      setOutputLang("json");
       showStatus("✅ Minified");
+    } catch (error) {
+      showStatus(`❌ ${(error as Error).message}`);
+    }
+  };
+
+  const handleJsonToXml = () => {
+    try {
+      setOutput(jsonToXml(input));
+      setOutputLang("xml");
+      setViewMode("raw");
+      showStatus("✅ Converted to XML");
     } catch (error) {
       showStatus(`❌ ${(error as Error).message}`);
     }
@@ -182,11 +198,9 @@ function App() {
 
   const handleDownload = () => {
     if (!output) return;
-    downloadJson(
-      output,
-      toolMode === "diff" ? "json-diff.txt" : "formatted.json",
-      toolMode === "diff" ? "text/plain" : "application/json"
-    );
+    const fileName = toolMode === "diff" ? "json-diff.txt" : outputLang === "xml" ? "output.xml" : "formatted.json";
+    const mimeType = toolMode === "diff" ? "text/plain" : outputLang === "xml" ? "application/xml" : "application/json";
+    downloadJson(output, fileName, mimeType);
     showStatus("⬇️ Download started");
   };
 
@@ -195,6 +209,7 @@ function App() {
     setCompareInput("");
     setOutput("");
     setDiffResult(null);
+    setOutputLang("json");
     setStatus("");
   };
 
@@ -268,6 +283,10 @@ function App() {
               className={`${btnBase} ${btnDisabled} bg-purple-600 hover:bg-purple-500`}>
               <BadgeCheck size={14} />Validate
             </button>
+            <button type="button" onClick={handleJsonToXml} disabled={toolMode === "diff"}
+              className={`${btnBase} ${btnDisabled} bg-teal-600 hover:bg-teal-500`}>
+              <Braces size={14} />To XML
+            </button>
           </div>
 
           {sep}
@@ -335,7 +354,9 @@ function App() {
                       Raw
                     </button>
                     <button type="button" onClick={() => setViewMode("tree")} aria-pressed={viewMode === "tree"}
-                      className={`rounded-md px-2.5 py-1 text-xs font-medium transition ${viewMode === "tree" ? (darkMode ? "bg-white text-slate-950" : "bg-slate-900 text-white") : (darkMode ? "text-slate-400 hover:text-slate-100" : "text-slate-600 hover:text-slate-950")}`}>
+                      disabled={outputLang === "xml"}
+                      title={outputLang === "xml" ? "Tree view is not available for XML output" : undefined}
+                      className={`rounded-md px-2.5 py-1 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-30 ${viewMode === "tree" ? (darkMode ? "bg-white text-slate-950" : "bg-slate-900 text-white") : (darkMode ? "text-slate-400 hover:text-slate-100" : "text-slate-600 hover:text-slate-950")}`}>
                       Tree
                     </button>
                   </div>
@@ -409,7 +430,7 @@ function App() {
               </div>
             ) : viewMode === "raw" ? (
               <div className={`h-[48dvh] min-h-[320px] overflow-hidden rounded-xl border xl:h-auto xl:min-h-0 xl:flex-1 ${darkMode ? "border-slate-700" : "border-slate-300"}`}>
-                <Editor height="100%" language="json" theme={darkMode ? "vs-dark" : "light"} value={output}
+                <Editor height="100%" language={outputLang} theme={darkMode ? "vs-dark" : "light"} value={output}
                   options={{ readOnly: true, minimap: { enabled: false }, fontSize: 14, automaticLayout: true, scrollBeyondLastLine: false }} />
               </div>
             ) : (
