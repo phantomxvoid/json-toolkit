@@ -18,6 +18,8 @@ import {
   ArrowRightLeft,
   CheckCircle2,
   Braces,
+  FileSpreadsheet,
+  X,
 } from "lucide-react";
 
 import { diffJson, formatDiffAsText, type DiffEntry, type DiffResult } from "./utils/diff";
@@ -25,6 +27,7 @@ import { formatJson, minifyJson } from "./utils/formatter";
 import { validateJson } from "./utils/validator";
 import { downloadJson } from "./utils/downloader";
 import { jsonToXml } from "./utils/xmlTransformer";
+import { prepareExcelData, downloadExcel, type ExcelData } from "./utils/excelExporter";
 
 type Theme = "dark" | "light";
 
@@ -108,6 +111,126 @@ function DiffCard({ entry, darkMode }: { entry: DiffEntry; darkMode: boolean }) 
   );
 }
 
+// ─── Excel preview modal ──────────────────────────────────────────────────────
+
+const PREVIEW_LIMIT = 200;
+
+function ExcelPreviewModal({
+  data,
+  darkMode,
+  onDownload,
+  onClose,
+}: {
+  data: ExcelData;
+  darkMode: boolean;
+  onDownload: () => void;
+  onClose: () => void;
+}) {
+  const [activeTab, setActiveTab] = useState(0);
+  const sheet = data.sheets[activeTab] ?? data.sheets[0];
+  const visibleRows = sheet.rows.slice(0, PREVIEW_LIMIT);
+  const hasMore = sheet.rows.length > PREVIEW_LIMIT;
+  const multiSheet = data.sheets.length > 1;
+  const totalRows = data.sheets.reduce((sum, s) => sum + s.rows.length, 0);
+
+  const cellBorder = darkMode ? "border-slate-800" : "border-slate-100";
+  const headerBg   = darkMode ? "bg-slate-800"    : "bg-slate-50";
+  const headerText = darkMode ? "text-slate-300"  : "text-slate-700";
+  const rowHover   = darkMode ? "hover:bg-slate-800/50" : "hover:bg-slate-50";
+  const mutedText  = darkMode ? "text-slate-500"  : "text-slate-400";
+  const cellText   = darkMode ? "text-slate-300"  : "text-slate-700";
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ backgroundColor: "rgba(0,0,0,0.65)" }}
+      onClick={onClose}
+    >
+      <div
+        className={`flex w-full max-w-5xl flex-col rounded-2xl border shadow-2xl max-h-[92dvh] xl:max-h-[88dvh] ${darkMode ? "bg-slate-900 border-slate-700" : "bg-white border-slate-200"}`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className={`flex shrink-0 items-center justify-between border-b px-5 py-4 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
+          <div>
+            <h2 className={`text-sm font-bold ${darkMode ? "text-white" : "text-slate-900"}`}>Excel Preview</h2>
+            <p className={`mt-0.5 text-xs ${mutedText}`}>
+              {totalRows} row{totalRows !== 1 ? "s" : ""} &nbsp;·&nbsp; {data.sheets.length} sheet{data.sheets.length !== 1 ? "s" : ""}
+            </p>
+          </div>
+          <button type="button" onClick={onClose}
+            className={`rounded-lg p-1.5 transition ${darkMode ? "text-slate-400 hover:bg-slate-800 hover:text-white" : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"}`}>
+            <X size={17} />
+          </button>
+        </div>
+
+        {/* Sheet tabs */}
+        {multiSheet && (
+          <div className={`flex shrink-0 gap-0.5 border-b px-4 pt-2 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
+            {data.sheets.map((s, i) => (
+              <button key={i} type="button" onClick={() => setActiveTab(i)}
+                className={`-mb-px rounded-t-lg border-b-2 px-3 py-1.5 text-xs font-medium transition ${
+                  activeTab === i
+                    ? darkMode ? "border-emerald-400 text-emerald-400" : "border-emerald-600 text-emerald-700"
+                    : darkMode ? "border-transparent text-slate-400 hover:text-slate-200" : "border-transparent text-slate-500 hover:text-slate-800"
+                }`}>
+                {s.name}
+                <span className={`ml-1.5 rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${darkMode ? "bg-slate-700 text-slate-400" : "bg-slate-100 text-slate-500"}`}>
+                  {s.rows.length}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Sheet info bar */}
+        <div className={`shrink-0 border-b px-5 py-1.5 text-xs ${mutedText} ${darkMode ? "border-slate-800" : "border-slate-100"}`}>
+          {sheet.rows.length} row{sheet.rows.length !== 1 ? "s" : ""} &nbsp;·&nbsp; {sheet.headers.length} column{sheet.headers.length !== 1 ? "s" : ""}
+          {hasMore && ` — showing first ${PREVIEW_LIMIT}`}
+        </div>
+
+        {/* Table */}
+        <div className="min-h-0 flex-1 overflow-auto">
+          <table className="w-full border-collapse text-xs">
+            <thead className={`sticky top-0 z-10 ${headerBg}`}>
+              <tr>
+                <th className={`w-10 border-r px-3 py-2 text-left font-semibold ${cellBorder} ${mutedText}`}>#</th>
+                {sheet.headers.map((h) => (
+                  <th key={h} className={`whitespace-nowrap border-r px-3 py-2 text-left font-semibold ${cellBorder} ${headerText}`}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {visibleRows.map((row, i) => (
+                <tr key={i} className={`border-t transition ${darkMode ? "border-slate-800" : "border-slate-100"} ${rowHover}`}>
+                  <td className={`border-r px-3 py-1.5 font-mono ${cellBorder} ${mutedText}`}>{i + 1}</td>
+                  {sheet.headers.map((h) => (
+                    <td key={h} className={`max-w-[200px] truncate border-r px-3 py-1.5 ${cellBorder} ${cellText}`}>
+                      {row[h] == null ? <span className="opacity-25">—</span> : String(row[h])}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Footer */}
+        <div className={`flex shrink-0 items-center justify-end gap-2 border-t px-5 py-3 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
+          <button type="button" onClick={onClose}
+            className={`rounded-lg px-4 py-2 text-xs font-medium transition ${darkMode ? "bg-slate-800 text-slate-300 hover:bg-slate-700" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`}>
+            Cancel
+          </button>
+          <button type="button" onClick={onDownload}
+            className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-medium text-white transition hover:bg-emerald-500">
+            <Download size={13} />Download .xlsx
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Main App ─────────────────────────────────────────────────────────────────
 
 function App() {
@@ -119,6 +242,7 @@ function App() {
   const [toolMode, setToolMode] = useState<"single" | "diff">("single");
   const [viewMode, setViewMode] = useState<"raw" | "tree">("raw");
   const [outputLang, setOutputLang] = useState<"json" | "xml">("json");
+  const [excelPreview, setExcelPreview] = useState<ExcelData | null>(null);
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const darkMode = theme === "dark";
   const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -166,6 +290,21 @@ function App() {
     }
   };
 
+  const handleJsonToExcel = () => {
+    try {
+      setExcelPreview(prepareExcelData(input));
+    } catch (error) {
+      showStatus(`❌ ${(error as Error).message}`);
+    }
+  };
+
+  const handleDownloadExcel = () => {
+    if (!excelPreview) return;
+    downloadExcel(excelPreview);
+    setExcelPreview(null);
+    showStatus("⬇️ Excel file downloaded");
+  };
+
   const handleValidate = () => {
     const result = validateJson(input);
     showStatus(result.valid ? "✅ Valid JSON" : `❌ ${result.error}`);
@@ -210,6 +349,7 @@ function App() {
     setOutput("");
     setDiffResult(null);
     setOutputLang("json");
+    setExcelPreview(null);
     setStatus("");
   };
 
@@ -286,6 +426,10 @@ function App() {
             <button type="button" onClick={handleJsonToXml} disabled={toolMode === "diff"}
               className={`${btnBase} ${btnDisabled} bg-teal-600 hover:bg-teal-500`}>
               <Braces size={14} />To XML
+            </button>
+            <button type="button" onClick={handleJsonToExcel} disabled={toolMode === "diff"}
+              className={`${btnBase} ${btnDisabled} bg-emerald-700 hover:bg-emerald-600`}>
+              <FileSpreadsheet size={14} />To Excel
             </button>
           </div>
 
@@ -451,6 +595,16 @@ function App() {
           JSON Toolkit • Build v1.0.0 &nbsp;|&nbsp; © 2026 All rights reserved
         </div>
       </div>
+
+      {/* Excel preview modal */}
+      {excelPreview && (
+        <ExcelPreviewModal
+          data={excelPreview}
+          darkMode={darkMode}
+          onDownload={handleDownloadExcel}
+          onClose={() => setExcelPreview(null)}
+        />
+      )}
     </div>
   );
 }
