@@ -20,7 +20,14 @@ import {
   Braces,
   FileSpreadsheet,
   X,
+  Search,
+  Wrench,
+  Table,
+  Code2,
 } from "lucide-react";
+
+import { JSONPath } from "jsonpath-plus";
+import { jsonrepair } from "jsonrepair";
 
 import { diffJson, formatDiffAsText, type DiffEntry, type DiffResult } from "./utils/diff";
 import { formatJson, minifyJson } from "./utils/formatter";
@@ -28,6 +35,8 @@ import { validateJson } from "./utils/validator";
 import { downloadJson } from "./utils/downloader";
 import { jsonToXml } from "./utils/xmlTransformer";
 import { prepareExcelData, downloadExcel, type ExcelData } from "./utils/excelExporter";
+import { jsonToCsv } from "./utils/csvExporter";
+import { generateJsonSchema } from "./utils/schemaGenerator";
 
 type Theme = "dark" | "light";
 
@@ -127,6 +136,13 @@ function ExcelPreviewModal({
   onClose: () => void;
 }) {
   const [activeTab, setActiveTab] = useState(0);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [onClose]);
+
   const sheet = data.sheets[activeTab] ?? data.sheets[0];
   const visibleRows = sheet.rows.slice(0, PREVIEW_LIMIT);
   const hasMore = sheet.rows.length > PREVIEW_LIMIT;
@@ -239,16 +255,22 @@ function App() {
   const [output, setOutput] = useState("");
   const [diffResult, setDiffResult] = useState<DiffResult | null>(null);
   const [status, setStatus] = useState("");
-  const [toolMode, setToolMode] = useState<"single" | "diff">("single");
+  const [toolMode, setToolMode] = useState<"single" | "diff" | "path">("single");
   const [viewMode, setViewMode] = useState<"raw" | "tree">("raw");
-  const [outputLang, setOutputLang] = useState<"json" | "xml">("json");
+  const [outputLang, setOutputLang] = useState<"json" | "xml" | "csv">("json");
   const [excelPreview, setExcelPreview] = useState<ExcelData | null>(null);
 
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const darkMode = theme === "dark";
   const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const clearTimerRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const editorRef      = useRef<any>(null);
+  const clearTimerRef       = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const editorRef           = useRef<any>(null);
+  const pasteDisposableRef  = useRef<{ dispose: () => void } | null>(null);
+  const pathTimerRef        = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const [pathQuery,   setPathQuery]   = useState("");
+  const [pathResults, setPathResults] = useState<Array<{ path: string; value: unknown }> | null>(null);
+  const [pathError,   setPathError]   = useState("");
   const [clearPending, setClearPending] = useState(false);
 
   const inputStats = useMemo(() => {
@@ -258,6 +280,31 @@ function App() {
     const size  = bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`;
     return `${lines} line${lines !== 1 ? "s" : ""} · ${size}`;
   }, [input]);
+
+  useEffect(() => {
+    return () => { pasteDisposableRef.current?.dispose(); };
+  }, []);
+
+  useEffect(() => {
+    if (toolMode !== "path") return;
+    if (pathTimerRef.current) clearTimeout(pathTimerRef.current);
+    if (!pathQuery.trim() || !input.trim()) {
+      setPathResults(null);
+      setPathError("");
+      return;
+    }
+    pathTimerRef.current = setTimeout(() => {
+      try {
+        const json = JSON.parse(input);
+        const raw: any[] = JSONPath({ path: pathQuery, json, resultType: "all" });
+        setPathResults(raw.map((r) => ({ path: r.path as string, value: r.value })));
+        setPathError("");
+      } catch (e) {
+        setPathResults(null);
+        setPathError((e as Error).message);
+      }
+    }, 300);
+  }, [pathQuery, input, toolMode]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -310,6 +357,38 @@ function App() {
     }
   };
 
+  const handleRepair = () => {
+    try {
+      const repaired = jsonrepair(input);
+      setOutput(repaired);
+      setOutputLang("json");
+      showStatus("✅ Repaired");
+    } catch (error) {
+      showStatus(`❌ ${(error as Error).message}`);
+    }
+  };
+
+  const handleJsonToCsv = () => {
+    try {
+      setOutput(jsonToCsv(input));
+      setOutputLang("csv");
+      setViewMode("raw");
+      showStatus("✅ Converted to CSV");
+    } catch (error) {
+      showStatus(`❌ ${(error as Error).message}`);
+    }
+  };
+
+  const handleJsonToSchema = () => {
+    try {
+      setOutput(generateJsonSchema(input));
+      setOutputLang("json");
+      showStatus("✅ Schema generated");
+    } catch (error) {
+      showStatus(`❌ ${(error as Error).message}`);
+    }
+  };
+
   const handleDownloadExcel = () => {
     if (!excelPreview) return;
     downloadExcel(excelPreview);
@@ -332,7 +411,7 @@ function App() {
       showStatus(
         result.entries.length === 0
           ? "✅ No differences"
-          : `Found ${result.entries.length} difference${result.entries.length !== 1 ? "s" : ""}`
+          : `✅ Found ${result.entries.length} difference${result.entries.length !== 1 ? "s" : ""}`
       );
     } catch (error) {
       setToolMode("diff");
@@ -347,16 +426,22 @@ function App() {
     showStatus("📋 Copied");
   };
 
+  const handleCopyPathResults = async () => {
+    if (!pathResults?.length) return;
+    await navigator.clipboard.writeText(JSON.stringify(pathResults.map((r) => r.value), null, 2));
+    showStatus("📋 Copied results");
+  };
+
   const handleDownload = () => {
     if (!output) return;
-    const fileName = toolMode === "diff" ? "json-diff.txt" : outputLang === "xml" ? "output.xml" : "formatted.json";
-    const mimeType = toolMode === "diff" ? "text/plain" : outputLang === "xml" ? "application/xml" : "application/json";
+    const fileName = toolMode === "diff" ? "json-diff.txt" : outputLang === "xml" ? "output.xml" : outputLang === "csv" ? "output.csv" : "formatted.json";
+    const mimeType = toolMode === "diff" ? "text/plain" : outputLang === "xml" ? "application/xml" : outputLang === "csv" ? "text/csv" : "application/json";
     downloadJson(output, fileName, mimeType);
     showStatus("⬇️ Download started");
   };
 
   const handleClear = () => {
-    if (!input && !compareInput && !output) return;
+    if (!input && !compareInput && !output && !pathQuery) return;
     if (!clearPending) {
       setClearPending(true);
       if (clearTimerRef.current) clearTimeout(clearTimerRef.current);
@@ -372,6 +457,9 @@ function App() {
     setOutputLang("json");
     setExcelPreview(null);
     setStatus("");
+    setPathQuery("");
+    setPathResults(null);
+    setPathError("");
   };
 
   const sep = (
@@ -421,38 +509,69 @@ function App() {
         <div className={`z-10 mb-3 flex shrink-0 flex-wrap items-center gap-2 rounded-xl border p-2 shadow-sm backdrop-blur ${darkMode ? "border-slate-800 bg-slate-950/70" : "border-slate-200 bg-white/90"}`}>
           <div role="group" aria-label="Tool mode"
             className={`flex overflow-hidden rounded-lg border p-0.5 ${darkMode ? "border-slate-700 bg-slate-800" : "border-slate-300 bg-slate-100"}`}>
-            <button type="button" onClick={() => setToolMode("single")} aria-pressed={toolMode === "single"}
+            <button type="button" onClick={() => {
+                setToolMode("single");
+                setOutput(""); setDiffResult(null); setOutputLang("json");
+                setClearPending(false);
+                if (clearTimerRef.current) clearTimeout(clearTimerRef.current);
+              }} aria-pressed={toolMode === "single"}
               className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${toolMode === "single" ? (darkMode ? "bg-white text-slate-950" : "bg-slate-900 text-white") : (darkMode ? "text-slate-400 hover:text-slate-100" : "text-slate-600 hover:text-slate-950")}`}>
               Tools
             </button>
-            <button type="button" onClick={() => { setToolMode("diff"); setViewMode("raw"); }} aria-pressed={toolMode === "diff"}
+            <button type="button" onClick={() => {
+                setToolMode("diff");
+                setViewMode("raw"); setOutput(""); setDiffResult(null);
+                setClearPending(false);
+                if (clearTimerRef.current) clearTimeout(clearTimerRef.current);
+              }} aria-pressed={toolMode === "diff"}
               className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${toolMode === "diff" ? (darkMode ? "bg-white text-slate-950" : "bg-slate-900 text-white") : (darkMode ? "text-slate-400 hover:text-slate-100" : "text-slate-600 hover:text-slate-950")}`}>
               Diff
+            </button>
+            <button type="button" onClick={() => {
+                setToolMode("path");
+                setOutput(""); setDiffResult(null);
+                setClearPending(false);
+                if (clearTimerRef.current) clearTimeout(clearTimerRef.current);
+              }} aria-pressed={toolMode === "path"}
+              className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${toolMode === "path" ? (darkMode ? "bg-white text-slate-950" : "bg-slate-900 text-white") : (darkMode ? "text-slate-400 hover:text-slate-100" : "text-slate-600 hover:text-slate-950")}`}>
+              Path
             </button>
           </div>
 
           {sep}
 
           <div className="flex flex-wrap gap-1.5">
-            <button type="button" onClick={handleFormat} disabled={toolMode === "diff"}
+            <button type="button" onClick={handleFormat} disabled={toolMode !== "single"}
               className={`${btnBase} ${btnDisabled} bg-blue-600 hover:bg-blue-500`}>
               <Wand2 size={14} />Format
             </button>
-            <button type="button" onClick={handleMinify} disabled={toolMode === "diff"}
+            <button type="button" onClick={handleMinify} disabled={toolMode !== "single"}
               className={`${btnBase} ${btnDisabled} bg-green-600 hover:bg-green-500`}>
               <Minimize2 size={14} />Minify
             </button>
-            <button type="button" onClick={handleValidate} disabled={toolMode === "diff"}
+            <button type="button" onClick={handleValidate} disabled={toolMode !== "single"}
               className={`${btnBase} ${btnDisabled} bg-purple-600 hover:bg-purple-500`}>
               <BadgeCheck size={14} />Validate
             </button>
-            <button type="button" onClick={handleJsonToXml} disabled={toolMode === "diff"}
+            <button type="button" onClick={handleJsonToXml} disabled={toolMode !== "single"}
               className={`${btnBase} ${btnDisabled} bg-teal-600 hover:bg-teal-500`}>
               <Braces size={14} />To XML
             </button>
-            <button type="button" onClick={handleJsonToExcel} disabled={toolMode === "diff"}
+            <button type="button" onClick={handleJsonToExcel} disabled={toolMode !== "single"}
               className={`${btnBase} ${btnDisabled} bg-emerald-700 hover:bg-emerald-600`}>
               <FileSpreadsheet size={14} />To Excel
+            </button>
+            <button type="button" onClick={handleJsonToCsv} disabled={toolMode !== "single"}
+              className={`${btnBase} ${btnDisabled} bg-orange-700 hover:bg-orange-600`}>
+              <Table size={14} />To CSV
+            </button>
+            <button type="button" onClick={handleRepair} disabled={toolMode !== "single"}
+              className={`${btnBase} ${btnDisabled} bg-rose-700 hover:bg-rose-600`}>
+              <Wrench size={14} />Repair
+            </button>
+            <button type="button" onClick={handleJsonToSchema} disabled={toolMode !== "single"}
+              className={`${btnBase} ${btnDisabled} bg-violet-600 hover:bg-violet-500`}>
+              <Code2 size={14} />Schema
             </button>
           </div>
 
@@ -503,7 +622,7 @@ function App() {
                 onChange={(v) => setInput(v || "")}
                 onMount={(editor) => {
                   editorRef.current = editor;
-                  editor.onDidPaste(() => {
+                  pasteDisposableRef.current = editor.onDidPaste(() => {
                     setTimeout(() => {
                       const value = editor.getValue();
                       try {
@@ -540,37 +659,108 @@ function App() {
             {/* Output header */}
             <div className="mb-2 flex shrink-0 items-center gap-2">
               <h2 className={`text-xs font-semibold uppercase tracking-wider ${darkMode ? "text-slate-500" : "text-slate-400"}`}>
-                {toolMode === "diff" ? "Diff Result" : "Output"}
+                {toolMode === "diff" ? "Diff Result" : toolMode === "path" ? "Path Results" : "Output"}
               </h2>
               <div className="ml-auto flex items-center gap-1.5">
-                {toolMode === "single" && (
-                  <div role="group" aria-label="View mode"
-                    className={`flex overflow-hidden rounded-lg border p-0.5 ${darkMode ? "border-slate-700 bg-slate-800" : "border-slate-300 bg-slate-100"}`}>
-                    <button type="button" onClick={() => setViewMode("raw")} aria-pressed={viewMode === "raw"}
-                      className={`rounded-md px-2.5 py-1 text-xs font-medium transition ${viewMode === "raw" ? (darkMode ? "bg-white text-slate-950" : "bg-slate-900 text-white") : (darkMode ? "text-slate-400 hover:text-slate-100" : "text-slate-600 hover:text-slate-950")}`}>
-                      Raw
+                {toolMode === "path" ? (
+                  pathResults && pathResults.length > 0 && (
+                    <>
+                      <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${darkMode ? "bg-sky-900 text-sky-300" : "bg-sky-100 text-sky-700"}`}>
+                        {pathResults.length} match{pathResults.length !== 1 ? "es" : ""}
+                      </span>
+                      <button type="button" onClick={handleCopyPathResults}
+                        className={`${btnBase} bg-orange-600 hover:bg-orange-500`}>
+                        <CopyIcon size={13} />Copy results
+                      </button>
+                    </>
+                  )
+                ) : (
+                  <>
+                    {toolMode === "single" && (
+                      <div role="group" aria-label="View mode"
+                        className={`flex overflow-hidden rounded-lg border p-0.5 ${darkMode ? "border-slate-700 bg-slate-800" : "border-slate-300 bg-slate-100"}`}>
+                        <button type="button" onClick={() => setViewMode("raw")} aria-pressed={viewMode === "raw"}
+                          className={`rounded-md px-2.5 py-1 text-xs font-medium transition ${viewMode === "raw" ? (darkMode ? "bg-white text-slate-950" : "bg-slate-900 text-white") : (darkMode ? "text-slate-400 hover:text-slate-100" : "text-slate-600 hover:text-slate-950")}`}>
+                          Raw
+                        </button>
+                        <button type="button" onClick={() => setViewMode("tree")} aria-pressed={viewMode === "tree"}
+                          disabled={outputLang === "xml" || outputLang === "csv"}
+                          title={outputLang === "xml" ? "Tree view is not available for XML output" : outputLang === "csv" ? "Tree view is not available for CSV output" : undefined}
+                          className={`rounded-md px-2.5 py-1 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-30 ${viewMode === "tree" ? (darkMode ? "bg-white text-slate-950" : "bg-slate-900 text-white") : (darkMode ? "text-slate-400 hover:text-slate-100" : "text-slate-600 hover:text-slate-950")}`}>
+                          Tree
+                        </button>
+                      </div>
+                    )}
+                    <button type="button" onClick={handleCopy} disabled={!output} title="Copy output"
+                      className={`${btnBase} ${btnDisabled} bg-orange-600 hover:bg-orange-500`}>
+                      <CopyIcon size={13} />Copy
                     </button>
-                    <button type="button" onClick={() => setViewMode("tree")} aria-pressed={viewMode === "tree"}
-                      disabled={outputLang === "xml"}
-                      title={outputLang === "xml" ? "Tree view is not available for XML output" : undefined}
-                      className={`rounded-md px-2.5 py-1 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-30 ${viewMode === "tree" ? (darkMode ? "bg-white text-slate-950" : "bg-slate-900 text-white") : (darkMode ? "text-slate-400 hover:text-slate-100" : "text-slate-600 hover:text-slate-950")}`}>
-                      Tree
+                    <button type="button" onClick={handleDownload} disabled={!output} title="Download output"
+                      className={`${btnBase} ${btnDisabled} bg-cyan-600 hover:bg-cyan-500`}>
+                      <Download size={13} />Save
                     </button>
-                  </div>
+                  </>
                 )}
-                <button type="button" onClick={handleCopy} disabled={!output} title="Copy output"
-                  className={`${btnBase} ${btnDisabled} bg-orange-600 hover:bg-orange-500`}>
-                  <CopyIcon size={13} />Copy
-                </button>
-                <button type="button" onClick={handleDownload} disabled={!output} title="Download output"
-                  className={`${btnBase} ${btnDisabled} bg-cyan-600 hover:bg-cyan-500`}>
-                  <Download size={13} />Save
-                </button>
               </div>
             </div>
 
             {/* Output body */}
-            {toolMode === "diff" ? (
+            {toolMode === "path" ? (
+              <div className="flex h-[48dvh] min-h-[320px] flex-col gap-2 xl:h-auto xl:min-h-0 xl:flex-1">
+                {/* Query input */}
+                <div className={`flex shrink-0 items-center gap-2 rounded-xl border px-3 py-2.5 ${darkMode ? "border-slate-700 bg-slate-900" : "border-slate-300 bg-white"}`}>
+                  <Search size={14} className={`shrink-0 ${darkMode ? "text-slate-500" : "text-slate-400"}`} />
+                  <input
+                    type="text"
+                    value={pathQuery}
+                    onChange={(e) => setPathQuery(e.target.value)}
+                    placeholder="$.store.book[*].title"
+                    spellCheck={false}
+                    className={`flex-1 bg-transparent font-mono text-sm outline-none ${darkMode ? "text-slate-100 placeholder-slate-600" : "text-slate-900 placeholder-slate-400"}`}
+                  />
+                  {pathQuery && (
+                    <button type="button" onClick={() => setPathQuery("")}
+                      className={`shrink-0 rounded p-0.5 transition ${darkMode ? "text-slate-500 hover:text-slate-300" : "text-slate-400 hover:text-slate-600"}`}>
+                      <X size={13} />
+                    </button>
+                  )}
+                </div>
+
+                {/* Results area */}
+                <div className={`flex-1 overflow-auto rounded-xl border p-3 ${darkMode ? "border-slate-700 bg-slate-950" : "border-slate-300 bg-slate-50"}`}>
+                  {!pathQuery.trim() ? (
+                    <div className="flex h-full flex-col items-center justify-center gap-2 py-8">
+                      <Search size={32} className={darkMode ? "text-slate-700" : "text-slate-300"} />
+                      <p className={`text-sm ${darkMode ? "text-slate-500" : "text-slate-400"}`}>Enter a JSONPath expression above.</p>
+                      <p className={`font-mono text-xs ${darkMode ? "text-slate-600" : "text-slate-400"}`}>e.g. $.users[*].name &nbsp;·&nbsp; $..price &nbsp;·&nbsp; $.items[?(@.qty &gt; 0)]</p>
+                    </div>
+                  ) : pathError ? (
+                    <div className={`rounded-xl border px-4 py-3 text-sm ${darkMode ? "border-rose-800 bg-rose-950/40 text-rose-300" : "border-rose-200 bg-rose-50 text-rose-700"}`}>
+                      <span className="font-semibold">Error: </span>{pathError}
+                    </div>
+                  ) : !pathResults || pathResults.length === 0 ? (
+                    <div className="flex h-full flex-col items-center justify-center gap-2 py-8">
+                      <p className={`text-sm ${darkMode ? "text-slate-500" : "text-slate-400"}`}>No matches found.</p>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-2">
+                      {pathResults.map((r, i) => (
+                        <div key={i} className={`overflow-hidden rounded-xl border ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
+                          <div className={`border-b px-3 py-1.5 font-mono text-xs ${darkMode ? "border-slate-700 bg-slate-900 text-sky-400" : "border-slate-200 bg-slate-50 text-sky-600"}`}>
+                            {r.path}
+                          </div>
+                          <div className={`px-3 py-2 ${darkMode ? "bg-slate-950" : "bg-white"}`}>
+                            <code className={`block break-all whitespace-pre-wrap text-xs ${darkMode ? "text-slate-300" : "text-slate-700"}`}>
+                              {JSON.stringify(r.value, null, 2)}
+                            </code>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : toolMode === "diff" ? (
               <div className={`h-[48dvh] min-h-[320px] overflow-auto rounded-xl border p-3 xl:h-auto xl:min-h-0 xl:flex-1 ${darkMode ? "border-slate-700 bg-slate-950" : "border-slate-300 bg-slate-50"}`}>
                 {diffResult ? (
                   diffResult.entries.length === 0 ? (
@@ -626,8 +816,16 @@ function App() {
                 )}
               </div>
             ) : viewMode === "raw" ? (
-              <div className={`h-[48dvh] min-h-[320px] overflow-hidden rounded-xl border xl:h-auto xl:min-h-0 xl:flex-1 ${darkMode ? "border-slate-700" : "border-slate-300"}`}>
-                <Editor height="100%" language={outputLang} theme={darkMode ? "vs-dark" : "light"} value={output}
+              <div className={`relative h-[48dvh] min-h-[320px] overflow-hidden rounded-xl border xl:h-auto xl:min-h-0 xl:flex-1 ${darkMode ? "border-slate-700" : "border-slate-300"}`}>
+                {!output && (
+                  <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center gap-2">
+                    <Wand2 size={28} className={darkMode ? "text-slate-700" : "text-slate-300"} />
+                    <p className={`text-sm ${darkMode ? "text-slate-600" : "text-slate-400"}`}>
+                      Run Format, Minify or Validate to see output
+                    </p>
+                  </div>
+                )}
+                <Editor height="100%" language={outputLang === "csv" ? "plaintext" : outputLang} theme={darkMode ? "vs-dark" : "light"} value={output}
                   options={{ readOnly: true, minimap: { enabled: false }, fontSize: 14, automaticLayout: true, scrollBeyondLastLine: false }} />
               </div>
             ) : (
