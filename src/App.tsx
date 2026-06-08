@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Editor from "@monaco-editor/react";
 import JsonView from "@uiw/react-json-view";
 import { vscodeTheme } from "@uiw/react-json-view/vscode";
@@ -243,9 +243,21 @@ function App() {
   const [viewMode, setViewMode] = useState<"raw" | "tree">("raw");
   const [outputLang, setOutputLang] = useState<"json" | "xml">("json");
   const [excelPreview, setExcelPreview] = useState<ExcelData | null>(null);
+
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const darkMode = theme === "dark";
   const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearTimerRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const editorRef      = useRef<any>(null);
+  const [clearPending, setClearPending] = useState(false);
+
+  const inputStats = useMemo(() => {
+    if (!input) return null;
+    const lines = input.split("\n").length;
+    const bytes = new Blob([input]).size;
+    const size  = bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`;
+    return `${lines} line${lines !== 1 ? "s" : ""} · ${size}`;
+  }, [input]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -344,6 +356,15 @@ function App() {
   };
 
   const handleClear = () => {
+    if (!input && !compareInput && !output) return;
+    if (!clearPending) {
+      setClearPending(true);
+      if (clearTimerRef.current) clearTimeout(clearTimerRef.current);
+      clearTimerRef.current = setTimeout(() => setClearPending(false), 2500);
+      return;
+    }
+    if (clearTimerRef.current) clearTimeout(clearTimerRef.current);
+    setClearPending(false);
     setInput("");
     setCompareInput("");
     setOutput("");
@@ -378,6 +399,7 @@ function App() {
             </p>
           </div>
 
+          <div className="flex shrink-0 items-center gap-2">
           <div
             role="group"
             aria-label="Theme mode"
@@ -391,6 +413,7 @@ function App() {
               className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition ${darkMode ? "bg-white text-slate-950" : "text-slate-600 hover:bg-slate-100 hover:text-slate-950"}`}>
               <Moon size={13} />Dark
             </button>
+          </div>
           </div>
         </div>
 
@@ -441,16 +464,11 @@ function App() {
               <GitCompareArrows size={14} />Compare
             </button>
             <button type="button" onClick={handleClear}
-              className={`${btnBase} bg-red-600 hover:bg-red-500`}>
-              <Trash2 size={14} />Clear
+              className={`${btnBase} transition-all ${clearPending ? "bg-orange-500 hover:bg-orange-400 ring-2 ring-orange-400/40" : "bg-red-600 hover:bg-red-500"}`}>
+              <Trash2 size={14} />{clearPending ? "Confirm?" : "Clear"}
             </button>
           </div>
 
-          {status && (
-            <div className={`ml-auto rounded-lg border px-3 py-1.5 text-xs ${darkMode ? "border-slate-700 bg-slate-900 text-slate-300" : "border-slate-200 bg-slate-50 text-slate-700"}`}>
-              {status}
-            </div>
-          )}
         </div>
 
         {/* Editor grid */}
@@ -458,13 +476,48 @@ function App() {
 
           {/* Input */}
           <div className="flex min-w-0 flex-col xl:min-h-0">
-            <h2 className={`mb-2 shrink-0 text-xs font-semibold uppercase tracking-wider ${darkMode ? "text-slate-500" : "text-slate-400"}`}>
-              {toolMode === "diff" ? "Original JSON" : "Input JSON"}
-            </h2>
-            <div className={`h-[48dvh] min-h-[320px] overflow-hidden rounded-xl border xl:h-auto xl:min-h-0 xl:flex-1 ${darkMode ? "border-slate-700" : "border-slate-300"}`}>
-              <Editor height="100%" defaultLanguage="json" theme={darkMode ? "vs-dark" : "light"} value={input}
+            <div className="mb-2 flex shrink-0 items-center gap-2">
+              <h2 className={`text-xs font-semibold uppercase tracking-wider ${darkMode ? "text-slate-500" : "text-slate-400"}`}>
+                {toolMode === "diff" ? "Original JSON" : "Input JSON"}
+              </h2>
+              {inputStats && (
+                <span className={`ml-auto rounded-md border px-2 py-0.5 font-mono text-xs tabular-nums ${darkMode ? "border-slate-700 bg-slate-800 text-slate-300" : "border-slate-200 bg-slate-100 text-slate-600"}`}>
+                  {inputStats}
+                </span>
+              )}
+            </div>
+            <div className={`relative h-[48dvh] min-h-[320px] overflow-hidden rounded-xl border xl:h-auto xl:min-h-0 xl:flex-1 ${darkMode ? "border-slate-700" : "border-slate-300"}`}>
+              {!input && (
+                <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center gap-2">
+                  <Braces size={28} className={darkMode ? "text-slate-700" : "text-slate-300"} />
+                  <p className={`text-sm ${darkMode ? "text-slate-600" : "text-slate-400"}`}>
+                    Paste or type JSON here…
+                  </p>
+                </div>
+              )}
+              <Editor
+                height="100%"
+                defaultLanguage="json"
+                theme={darkMode ? "vs-dark" : "light"}
+                value={input}
                 onChange={(v) => setInput(v || "")}
-                options={{ minimap: { enabled: false }, fontSize: 14, automaticLayout: true, formatOnPaste: true, formatOnType: true, scrollBeyondLastLine: false }} />
+                onMount={(editor) => {
+                  editorRef.current = editor;
+                  editor.onDidPaste(() => {
+                    setTimeout(() => {
+                      const value = editor.getValue();
+                      try {
+                        setOutput(formatJson(value));
+                        setOutputLang("json");
+                        showStatus("✅ Auto-formatted");
+                      } catch {
+                        // not valid JSON yet — ignore
+                      }
+                    }, 150);
+                  });
+                }}
+                options={{ minimap: { enabled: false }, fontSize: 14, automaticLayout: true, formatOnPaste: true, formatOnType: true, scrollBeyondLastLine: false }}
+              />
             </div>
           </div>
 
@@ -579,12 +632,15 @@ function App() {
               </div>
             ) : (
               <div className={`h-[48dvh] min-h-[320px] overflow-auto rounded-xl border p-4 xl:h-auto xl:min-h-0 xl:flex-1 ${darkMode ? "border-slate-700 bg-slate-900" : "border-slate-300 bg-white"}`}>
-                {output ? (
-                  <JsonView value={JSON.parse(output)} collapsed={1} displayDataTypes={false}
-                    style={darkMode ? vscodeTheme : { backgroundColor: "#ffffff", color: "#111827" }} />
-                ) : (
-                  <div className="text-sm text-slate-500">Format valid JSON to view tree structure.</div>
-                )}
+                {(() => {
+                  if (!output) return <div className="text-sm text-slate-500">Format valid JSON to view tree structure.</div>;
+                  try {
+                    return <JsonView value={JSON.parse(output)} collapsed={1} displayDataTypes={false}
+                      style={darkMode ? vscodeTheme : { backgroundColor: "#ffffff", color: "#111827" }} />;
+                  } catch {
+                    return <div className={`text-sm ${darkMode ? "text-rose-400" : "text-rose-600"}`}>Output is not valid JSON — switch to Raw view.</div>;
+                  }
+                })()}
               </div>
             )}
           </div>
@@ -605,6 +661,21 @@ function App() {
           onClose={() => setExcelPreview(null)}
         />
       )}
+
+      {/* Corner toast */}
+      <div
+        className={`fixed bottom-5 right-5 z-50 max-w-xs rounded-xl border px-4 py-2.5 text-sm font-medium shadow-lg backdrop-blur-sm transition-all duration-300 ${
+          status ? "translate-y-0 opacity-100" : "pointer-events-none translate-y-3 opacity-0"
+        } ${
+          status.startsWith("❌")
+            ? darkMode ? "border-rose-700 bg-rose-950/90 text-rose-300" : "border-rose-200 bg-rose-50 text-rose-700"
+            : status.startsWith("✅") || status.startsWith("📋") || status.startsWith("⬇️")
+            ? darkMode ? "border-emerald-700 bg-emerald-950/90 text-emerald-300" : "border-emerald-200 bg-emerald-50 text-emerald-700"
+            : darkMode ? "border-slate-700 bg-slate-900/90 text-slate-300" : "border-slate-200 bg-white text-slate-700"
+        }`}
+      >
+        {status}
+      </div>
     </div>
   );
 }
